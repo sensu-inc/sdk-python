@@ -9,6 +9,8 @@ import warnings
 from contextvars import ContextVar
 from typing import Any, Callable, Coroutine, Dict, List, Literal, Optional, Tuple, TypeVar
 
+import httpx
+
 from sensu._pricing import estimate_cost, resolve_pricing
 from sensu._types import (
     ContextBreakdown,
@@ -166,6 +168,7 @@ class StepHandle:
         llm_call_id = opts.get("llm_call_id") or new_id()
         emit_every = opts.get("emit_every_n_tokens", 10)
         on_complete = opts.get("on_complete")
+        max_context_tokens = opts.get("max_context_tokens")
 
         start_ms = time.monotonic() * 1000
         first_token_ms: Optional[float] = None
@@ -192,7 +195,7 @@ class StepHandle:
         latency_ms = time.monotonic() * 1000 - start_ms
         ttft_ms = (first_token_ms - start_ms) if first_token_ms else None
 
-        self._client.enqueue(self._base(
+        completion: Dict[str, Any] = self._base(
             event_type="llm.request.completed",
             provider=provider,
             model=model,
@@ -200,7 +203,10 @@ class StepHandle:
             latency_ms=latency_ms,
             ttft_ms=ttft_ms,
             status="success",
-        ))
+        )
+        if max_context_tokens is not None:
+            completion["max_context_tokens"] = max_context_tokens
+        self._client.enqueue(completion)
 
         if on_complete:
             on_complete(full_text, ttft_ms)
@@ -528,7 +534,7 @@ class RunHandle:
     def record_feedback(self, opts: RecordFeedbackOptions) -> None:
         event: Dict[str, Any] = self._base(
             event_type="feedback.received",
-            feedback_type=opts["type"],
+            type=opts["type"],
         )
         for key in ("score", "comment", "end_user_id"):
             if key in opts:
@@ -627,7 +633,9 @@ class SensuClient:
         self._run_tool_counts: Dict[str, Dict[str, int]] = {}
         self._flush_task: Optional[asyncio.Task[None]] = None
         self._stopped = False
-        self._async_http: Optional[Any] = None  # httpx.AsyncClient created lazily
+        self._async_http: Optional[httpx.AsyncClient] = (
+            None if self.disabled else httpx.AsyncClient(timeout=10.0)
+        )
 
         if not self.disabled:
             atexit.register(self._atexit_flush)
@@ -658,10 +666,7 @@ class SensuClient:
             batch = self._buffer[:]
             self._buffer = []
 
-        import httpx
         try:
-            if self._async_http is None:
-                self._async_http = httpx.AsyncClient(timeout=10.0)
             resp = await self._async_http.post(
                 f"{self._base_url}/api/v1/events",
                 json={"events": batch},
