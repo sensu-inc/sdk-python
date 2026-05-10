@@ -22,9 +22,11 @@ from sensu._types import (
     RawGuardrailOptions,
     RawLlmCallOptions,
     RawRetrievalOptions,
+    FeedbackOptions,
     RecordEvalScoreOptions,
     RecordFeedbackOptions,
     RecordPromptRenderOptions,
+    ScoreOptions,
     ResumeSessionOptions,
     SpawnRunOptions,
     StartRunOptions,
@@ -687,6 +689,69 @@ class SensuClient:
             # re-queue on network error
             with self._buffer_lock:
                 self._buffer = batch + self._buffer
+
+    # -- Run-less feedback / eval helpers ------------------------------------
+
+    async def feedback(self, opts: FeedbackOptions) -> Optional[Dict[str, Any]]:
+        """Post end-user feedback for a run. Run-less helper — no active sensu.run() context required.
+
+        Hits POST /api/v1/feedback directly (not the event buffer).
+        Returns the parsed JSON response (``{"id": "..."}``) or None on failure.
+        """
+        if self.disabled or not self._api_key or self._async_http is None:
+            return None
+        body: Dict[str, Any] = {"runId": opts["run_id"], "type": opts["type"]}
+        for src, dest in (("score", "score"), ("comment", "comment"), ("end_user_id", "endUserId")):
+            if src in opts:
+                body[dest] = opts[src]  # type: ignore[literal-required]
+        try:
+            resp = await self._async_http.post(
+                f"{self._base_url}/api/v1/feedback",
+                json=body,
+                headers={"Content-Type": "application/json", "X-API-Key": self._api_key},
+            )
+            if resp.status_code >= 400:
+                warnings.warn(f"[sensu] feedback failed {resp.status_code}: {resp.text}")
+                return None
+            return resp.json()
+        except Exception as e:
+            warnings.warn(f"[sensu] feedback network error: {e}")
+            return None
+
+    async def score(self, opts: ScoreOptions) -> Optional[Dict[str, Any]]:
+        """Post an automated eval score for a run. Run-less helper.
+
+        Hits POST /api/v1/eval-scores directly (not the event buffer).
+        Returns the parsed JSON response (``{"id": "..."}``) or None on failure.
+        """
+        if self.disabled or not self._api_key or self._async_http is None:
+            return None
+        body: Dict[str, Any] = {
+            "runId":  opts["run_id"],
+            "metric": opts["metric"],
+            "score":  opts["score"],
+        }
+        for src, dest in (
+            ("evaluator_id", "evaluatorId"),
+            ("model_used_for_eval", "modelUsedForEval"),
+            ("step_id", "stepId"),
+            ("llm_call_id", "llmCallId"),
+        ):
+            if src in opts:
+                body[dest] = opts[src]  # type: ignore[literal-required]
+        try:
+            resp = await self._async_http.post(
+                f"{self._base_url}/api/v1/eval-scores",
+                json=body,
+                headers={"Content-Type": "application/json", "X-API-Key": self._api_key},
+            )
+            if resp.status_code >= 400:
+                warnings.warn(f"[sensu] score failed {resp.status_code}: {resp.text}")
+                return None
+            return resp.json()
+        except Exception as e:
+            warnings.warn(f"[sensu] score network error: {e}")
+            return None
 
     def _atexit_flush(self) -> None:
         """Called by atexit — may run outside any event loop."""

@@ -407,3 +407,129 @@ async def test_flush_requeues_on_network_error() -> None:
 
     # Event should be back in the buffer
     assert len(client._buffer) == 1
+
+
+# ---------------------------------------------------------------------------
+# Run-less feedback() / score() helpers (Phase 0a)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_feedback_posts_camelcase_payload_to_correct_endpoint() -> None:
+    client = make_client()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 201
+    mock_resp.json.return_value = {"id": "fb_123"}
+
+    mock_http = AsyncMock()
+    mock_http.post = AsyncMock(return_value=mock_resp)
+    client._async_http = mock_http
+
+    result = await client.feedback({
+        "run_id":      "run-abc",
+        "type":        "thumbs_down",
+        "score":       0.2,
+        "comment":     "missed the point",
+        "end_user_id": "user-77",
+    })
+
+    assert result == {"id": "fb_123"}
+    mock_http.post.assert_called_once()
+    args, kwargs = mock_http.post.call_args
+    assert args[0].endswith("/api/v1/feedback")
+    assert kwargs["json"] == {
+        "runId":     "run-abc",
+        "type":      "thumbs_down",
+        "score":     0.2,
+        "comment":   "missed the point",
+        "endUserId": "user-77",
+    }
+    assert kwargs["headers"]["X-API-Key"] == "test-key"
+
+
+@pytest.mark.asyncio
+async def test_feedback_omits_unset_optional_fields() -> None:
+    client = make_client()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 201
+    mock_resp.json.return_value = {"id": "fb_124"}
+    mock_http = AsyncMock()
+    mock_http.post = AsyncMock(return_value=mock_resp)
+    client._async_http = mock_http
+
+    await client.feedback({"run_id": "run-abc", "type": "thumbs_up"})
+
+    _, kwargs = mock_http.post.call_args
+    assert kwargs["json"] == {"runId": "run-abc", "type": "thumbs_up"}
+    assert "score" not in kwargs["json"]
+    assert "comment" not in kwargs["json"]
+
+
+@pytest.mark.asyncio
+async def test_feedback_returns_none_on_4xx() -> None:
+    client = make_client()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_resp.text = "Run not found"
+    mock_http = AsyncMock()
+    mock_http.post = AsyncMock(return_value=mock_resp)
+    client._async_http = mock_http
+
+    with pytest.warns(UserWarning, match="feedback failed 404"):
+        result = await client.feedback({"run_id": "missing", "type": "thumbs_up"})
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_feedback_returns_none_when_disabled() -> None:
+    client = make_client(disabled=True)
+    # No mocking needed — should short-circuit
+    result = await client.feedback({"run_id": "run-abc", "type": "thumbs_up"})
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_score_posts_camelcase_payload_to_correct_endpoint() -> None:
+    client = make_client()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 201
+    mock_resp.json.return_value = {"id": "es_999"}
+
+    mock_http = AsyncMock()
+    mock_http.post = AsyncMock(return_value=mock_resp)
+    client._async_http = mock_http
+
+    result = await client.score({
+        "run_id":              "run-abc",
+        "metric":              "helpfulness",
+        "score":               0.83,
+        "evaluator_id":        "human-v1",
+        "model_used_for_eval": "claude-haiku-4-5",
+        "step_id":             "step-1",
+        "llm_call_id":         "call-1",
+    })
+
+    assert result == {"id": "es_999"}
+    args, kwargs = mock_http.post.call_args
+    assert args[0].endswith("/api/v1/eval-scores")
+    assert kwargs["json"] == {
+        "runId":            "run-abc",
+        "metric":           "helpfulness",
+        "score":            0.83,
+        "evaluatorId":      "human-v1",
+        "modelUsedForEval": "claude-haiku-4-5",
+        "stepId":           "step-1",
+        "llmCallId":        "call-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_score_returns_none_on_network_error() -> None:
+    client = make_client()
+    mock_http = AsyncMock()
+    mock_http.post = AsyncMock(side_effect=ConnectionError("down"))
+    client._async_http = mock_http
+
+    with pytest.warns(UserWarning, match="score network error"):
+        result = await client.score({"run_id": "r", "metric": "m", "score": 0.5})
+    assert result is None

@@ -225,6 +225,30 @@ class RecordEvalScoreOptions(TypedDict, total=False):
     llm_call_id: str
 
 
+class FeedbackOptions(TypedDict, total=False):
+    """Options for the run-less, top-level ``client.feedback()`` helper."""
+    # required
+    run_id: str
+    type: Literal["thumbs_up", "thumbs_down", "score", "correction"]
+    # optional
+    score: float
+    comment: str
+    end_user_id: str
+
+
+class ScoreOptions(TypedDict, total=False):
+    """Options for the run-less, top-level ``client.score()`` helper."""
+    # required
+    run_id: str
+    metric: str
+    score: float
+    # optional
+    evaluator_id: str
+    model_used_for_eval: str
+    step_id: str
+    llm_call_id: str
+
+
 # ---------------------------------------------------------------------------
 # Multi-agent
 # ---------------------------------------------------------------------------
