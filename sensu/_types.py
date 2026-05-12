@@ -82,6 +82,11 @@ class MessageSnapshotItem(TypedDict):
     token_count: int
     content_hash: str
     tool_name: NotRequired[str]
+    # Optional raw message body. Only forwarded to the API when the client
+    # was constructed with capture_message_bodies=True. The API masks PII
+    # via its shared pipeline at ingest. Max 65,536 chars (longer bodies
+    # are truncated client-side to match the server schema cap).
+    body: NotRequired[str]
 
 
 class TrackLlmOptions(TypedDict, total=False):

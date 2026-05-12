@@ -152,7 +152,7 @@ class StepHandle:
         if ctx_breakdown is not None:
             event["context_breakdown"] = ctx_breakdown
         if msgs is not None:
-            event["messages_snapshot"] = msgs
+            event["messages_snapshot"] = self._client.sanitize_messages_snapshot(msgs)
         if chunk_ids is not None:
             event["referenced_chunk_ids"] = chunk_ids
 
@@ -628,6 +628,12 @@ class SensuClient:
         self._loop_threshold: int = opts.get("loop_threshold", 5)
         self._disable_live_pricing: bool = bool(opts.get("disable_live_pricing", False))
         self._debug_mode: bool = bool(opts.get("debug_mode", False))
+        # When False (default), the SDK strips `body` from every message
+        # snapshot before flushing. Setting True opts the org into the
+        # Replay v1 unmask flow — the API masks PII server-side; raw
+        # bodies stay tenant-side and require an audited unmask to read.
+        # See planning/REPLAY_V1_PLAN.md §7.
+        self.capture_message_bodies: bool = bool(opts.get("capture_message_bodies", False))
 
         self._buffer: List[Dict[str, Any]] = []
         self._buffer_lock = threading.Lock()
@@ -641,6 +647,27 @@ class SensuClient:
 
         if not self.disabled:
             atexit.register(self._atexit_flush)
+
+    # -- Message-snapshot sanitization --------------------------------------
+
+    _MAX_BODY_CHARS = 65_536  # matches server schema cap
+
+    def sanitize_messages_snapshot(self, msgs: List[Any]) -> List[Dict[str, Any]]:
+        """Strip ``body`` from every snapshot unless ``capture_message_bodies``
+        is True; cap body length at 65,536 chars to match the server schema.
+
+        Called from track_llm() before the event hits the wire. Centralizes
+        the capture decision so future producers can reuse it.
+        """
+        out: List[Dict[str, Any]] = []
+        for m in msgs:
+            d = dict(m)  # TypedDict → plain dict, also a defensive copy
+            if not self.capture_message_bodies:
+                d.pop("body", None)
+            elif isinstance(d.get("body"), str) and len(d["body"]) > self._MAX_BODY_CHARS:
+                d["body"] = d["body"][: self._MAX_BODY_CHARS]
+            out.append(d)
+        return out
 
     # -- Buffer & flushing ---------------------------------------------------
 
