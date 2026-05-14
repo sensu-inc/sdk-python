@@ -75,7 +75,7 @@ def wrap_openai(openai_client: object, opts: WrapOpenAIOptions) -> object:
     return _wrap(openai_client, opts)
 
 
-__version__ = "0.5.3"
+__version__ = "0.8.0"
 
 __all__ = [
     # Core classes
