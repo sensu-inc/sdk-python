@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import json
 import os
 import threading
 import time
@@ -45,6 +46,82 @@ T = TypeVar("T")
 
 # Module-level ContextVar — one per process; task-isolated under asyncio
 _active_run_var: ContextVar["RunHandle"] = ContextVar("sensu_active_run")
+
+
+# ---------------------------------------------------------------------------
+# Tool I/O body capture (TOOL_IO_CAPTURE_PLAN.md §5.2 + §11.3 + §5.4)
+# ---------------------------------------------------------------------------
+
+# 256 KB per field. Wider than the LLM message-body cap (64 KB) because
+# real tool outputs — JSON manifests, HTML excerpts, search results —
+# routinely run past 64 KB. The Sensu API enforces the same cap
+# defensively via ``z.string().max(262144)`` on the tool.call.completed
+# schema.
+_MAX_TOOL_BODY_CHARS = 262_144
+
+# Cross-SDK truncation marker (§5.4). Leading space is intentional so
+# the marker lands cleanly on a word boundary in the inspector. Same
+# byte sequence as ``sdk-ts`` and ``sdk-go`` — keeps the on-the-wire
+# shape uniform across languages.
+_TRUNCATION_MARKER = " …[truncated]"
+
+# Sentinel for "no args passed". Using a unique object (rather than
+# ``None``) preserves the user's right to explicitly pass ``None`` as
+# the tool's input — that serializes to ``"null"`` and is captured.
+# Cross-SDK parity with sdk-ts, where omitted args (undefined) skip
+# capture but an explicit ``null`` argument does not.
+_ARGS_NOT_PROVIDED = object()
+
+
+def serialize_tool_bodies_for_capture(
+    args: Any,
+    result: Any,
+    *,
+    capture_bodies: bool,
+    args_provided: bool,
+) -> Dict[str, str]:
+    """Serialize tool I/O bodies for transport on tool.call.completed.
+
+    Implements TOOL_IO_CAPTURE_PLAN.md §5.2 + §11.4. Returns a dict
+    suitable for splatting into the event payload:
+
+    - opt-out (capture_bodies=False) → empty dict; neither body field
+      emitted. Matches v1 metadata-only behavior.
+    - opt-in but caller omitted ``args`` → empty dict. Cross-SDK
+      parity with sdk-ts (undefined args → skip capture).
+    - opt-in + both sides JSON-serialize cleanly → dict with
+      ``input_body`` and ``output_body``, each ≤ 256 KB.
+    - opt-in + serialization fails for either side (circular reference,
+      anything ``default=str`` can't handle) → empty dict. Skip BOTH
+      bodies rather than half-capturing — keeps the server's
+      "snapshotMissing" affordance coherent (§11.4 lean A).
+
+    ``json.dumps(default=str)`` (per §5.2) means datetime / Decimal /
+    UUID / custom objects fall back to ``str(obj)`` instead of raising.
+    The narrower failure surface (vs sdk-ts, where TypeError on these
+    types skips capture) is intentional — Python's idiom is to lean on
+    ``__str__`` rather than refuse the call.
+
+    Exported for unit tests so the serialization rules can be pinned
+    without standing up a full client + run + step + mock httpx.
+    """
+    if not capture_bodies or not args_provided:
+        return {}
+    try:
+        input_body  = json.dumps(args,   default=str, ensure_ascii=False)
+        output_body = json.dumps(result, default=str, ensure_ascii=False)
+    except (TypeError, ValueError, RecursionError):
+        return {}
+    return {
+        "input_body":  _truncate_tool_body_for_transport(input_body),
+        "output_body": _truncate_tool_body_for_transport(output_body),
+    }
+
+
+def _truncate_tool_body_for_transport(s: str) -> str:
+    if len(s) <= _MAX_TOOL_BODY_CHARS:
+        return s
+    return s[: _MAX_TOOL_BODY_CHARS - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +339,13 @@ class StepHandle:
         latency_ms = time.monotonic() * 1000 - start_ms
         output_bytes = estimate_bytes(result) if result is not None else 0
 
+        body_fields = serialize_tool_bodies_for_capture(
+            opts.get("args"),
+            result,
+            capture_bodies=bool(opts.get("capture_bodies", False)),
+            args_provided="args" in opts,
+        )
+
         self._client.enqueue(self._base(
             event_type="tool.call.completed",
             tool_name=tool_name,
@@ -269,6 +353,7 @@ class StepHandle:
             latency_ms=latency_ms,
             status=status,
             output_size_bytes=output_bytes,
+            **body_fields,
         ))
 
         if exc is not None:
@@ -909,7 +994,17 @@ class SensuClient:
         fn: Callable[[], Coroutine[Any, Any, T]],
         *,
         retry_of: Optional[str] = None,
+        args: Any = _ARGS_NOT_PROVIDED,
+        capture_bodies: bool = False,
     ) -> T:
+        """Track a tool call inside the active ``sensu.run()`` context.
+
+        Pass ``args`` + ``capture_bodies=True`` to ship the tool's input
+        and result on ``tool.call.completed``. The Sensu API runs its
+        shared PII pipeline at ingest — raw bodies never leave the
+        tenant boundary unmasked. Per-call opt-in
+        (TOOL_IO_CAPTURE_PLAN.md §11.2).
+        """
         run = self.get_active_run()
         if run is None:
             return await fn()
@@ -918,6 +1013,10 @@ class SensuClient:
             opts: TrackToolOptions = {"tool_name": tool_name, "fn": fn}
             if retry_of:
                 opts["retry_of"] = retry_of
+            if capture_bodies:
+                opts["capture_bodies"] = True
+            if args is not _ARGS_NOT_PROVIDED:
+                opts["args"] = args
             result = await step.track_tool(opts)
         finally:
             await step.end()

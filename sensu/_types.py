@@ -144,6 +144,15 @@ class TrackToolOptions(TypedDict, total=False):
     fn: AsyncFn
     # optional
     retry_of: str
+    # Tool I/O body capture (TOOL_IO_CAPTURE_PLAN.md §5.2). When
+    # ``capture_bodies`` is True, ``args`` and the awaited result of
+    # ``fn`` are JSON-serialized and shipped on tool.call.completed as
+    # ``input_body`` + ``output_body``. The Sensu API masks PII via
+    # its shared pipeline at ingest and surfaces the raw bodies only
+    # through the audited Replay unmask flow. Per-call opt-in (not
+    # per-client) so storage and PII exposure are explicit decisions.
+    args: Any
+    capture_bodies: bool
 
 
 # ---------------------------------------------------------------------------
