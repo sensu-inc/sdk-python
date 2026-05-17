@@ -76,8 +76,8 @@ def wrap_openai(openai_client: object, opts: WrapOpenAIOptions) -> object:
 
 
 def __getattr__(name: str) -> object:
-    """Lazy re-exports so importing ``langchain``/``langgraph`` is only
-    required when the relevant handler is actually referenced. Keeps the
+    """Lazy re-exports so importing ``langchain``/``langgraph``/``crewai`` is
+    only required when the relevant handler is actually referenced. Keeps the
     core import path zero-dep."""
     if name == "SensuCallbackHandler":
         from sensu.integrations.langchain import SensuCallbackHandler as _Handler
@@ -85,10 +85,13 @@ def __getattr__(name: str) -> object:
     if name == "SensuLangGraphHandler":
         from sensu.integrations.langgraph import SensuLangGraphHandler as _Handler
         return _Handler
+    if name == "SensuCrewListener":
+        from sensu.integrations.crewai import SensuCrewListener as _Handler
+        return _Handler
     raise AttributeError(f"module 'sensu' has no attribute {name!r}")
 
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 __all__ = [
     # Core classes
@@ -102,6 +105,7 @@ __all__ = [
     "WrapOpenAIOptions",
     "SensuCallbackHandler",      # lazy — requires the [langchain] extra at use time
     "SensuLangGraphHandler",     # lazy — requires the [langgraph] extra at use time
+    "SensuCrewListener",         # lazy — requires the [crewai] extra at use time
     # TypedDicts — option types
     "SensuClientOptions",
     "StartRunOptions",

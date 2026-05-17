@@ -12,6 +12,7 @@ pip install "sensu-sdk[anthropic]"       # + Anthropic auto-tracking
 pip install "sensu-sdk[openai]"          # + OpenAI auto-tracking
 pip install "sensu-sdk[langchain]"       # + LangChain callback handler
 pip install "sensu-sdk[langgraph]"       # + LangGraph node-aware handler
+pip install "sensu-sdk[crewai]"          # + CrewAI multi-agent listener
 pip install "sensu-sdk[all]"             # everything
 ```
 
@@ -149,6 +150,56 @@ with either handler; the parent class auto-detects LangGraph nodes from the
 callback metadata too.
 
 Requires the `langgraph` extra (`pip install 'sensu-sdk[langgraph]'`).
+
+## CrewAI
+
+Running multi-agent workflows with [CrewAI](https://crewai.com)? Use
+`SensuCrewListener` to attach Sensu to CrewAI's native event bus. Each
+agent gets a stable child id (`{orchestrator}::{role}`), task lifecycle
+events become `agent.step.*`, role switches emit `agent.handoff`, and
+LLM + tool calls land as the same `llm.request.*` / `tool.call.*` events
+the LangChain integration produces.
+
+```python
+import sensu
+from sensu.integrations.crewai import SensuCrewListener
+from crewai import Agent, Task, Crew, Process
+
+# The Sensu agent_id is the "crew orchestrator" label; each CrewAI agent
+# inside the crew becomes a child agent like "research-crew::researcher".
+client = sensu.SensuClient({"from_env": True, "agent_id": "research-crew"})
+SensuCrewListener(client=client)  # one-line attach to the global event bus
+
+researcher = Agent(role="researcher", goal="...", backstory="...", llm=llm)
+writer     = Agent(role="writer",     goal="...", backstory="...", llm=llm)
+
+task1 = Task(description="Research", expected_output="...", agent=researcher)
+task2 = Task(description="Write",    expected_output="...", agent=writer)
+
+crew = Crew(
+    agents=[researcher, writer],
+    tasks=[task1, task2],
+    process=Process.sequential,
+)
+result = crew.kickoff(inputs={"topic": "observability"})
+```
+
+**Event mapping.**
+
+| CrewAI event | Sensu event |
+|---|---|
+| `CrewKickoffStartedEvent`              | (no Sensu event — run lifecycle owned by `SensuClient`) |
+| `TaskStartedEvent`                     | `agent.step.started` (`step_type='crewai_task'`) |
+| `TaskCompletedEvent` / `TaskFailedEvent` | `agent.step.completed` (with `status: success` / `error`) |
+| `AgentExecutionStartedEvent`           | `agent.spawned` (once per role) + `agent.handoff` on role switch |
+| `LLMCallStartedEvent` / Completed / Failed | `llm.request.started` / `llm.request.completed` (with `is_fallback` after error) |
+| `ToolUsageStartedEvent` / Finished / Error | `tool.call.started` / `tool.call.completed` (with `retry_of` on retry) |
+
+The multi-agent identity mapping is what makes this useful: every spawn
+populates `agent_spawns.child_agent_id` so the multi-agent system map
+gets a real topology to render once that feature ships.
+
+Requires the `crewai` extra (`pip install 'sensu-sdk[crewai]'`).
 
 ## Environment variables
 
