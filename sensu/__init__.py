@@ -75,7 +75,16 @@ def wrap_openai(openai_client: object, opts: WrapOpenAIOptions) -> object:
     return _wrap(openai_client, opts)
 
 
-__version__ = "0.8.0"
+def __getattr__(name: str) -> object:
+    """Lazy re-export so importing ``langchain`` is only required when the
+    handler is actually referenced. Keeps the core import path zero-dep."""
+    if name == "SensuCallbackHandler":
+        from sensu.integrations.langchain import SensuCallbackHandler as _Handler
+        return _Handler
+    raise AttributeError(f"module 'sensu' has no attribute {name!r}")
+
+
+__version__ = "0.9.0"
 
 __all__ = [
     # Core classes
@@ -87,6 +96,7 @@ __all__ = [
     "wrap_openai",
     "WrapAnthropicOptions",
     "WrapOpenAIOptions",
+    "SensuCallbackHandler",  # lazy — requires the [langchain] extra at use time
     # TypedDicts — option types
     "SensuClientOptions",
     "StartRunOptions",

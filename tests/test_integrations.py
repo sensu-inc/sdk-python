@@ -216,11 +216,23 @@ async def test_wrap_openai_reraises_exception() -> None:
 
 
 def test_langchain_handler_import_error_without_langchain() -> None:
-    """SensuCallbackHandler should raise ImportError when langchain is absent."""
+    """SensuCallbackHandler should raise ImportError when langchain is absent.
+
+    The handler probes both `langchain_core.callbacks.base` (LangChain 1.x) and
+    `langchain.callbacks.base` (0.x), so both must be unavailable to trigger.
+    """
     import sys
     from unittest.mock import patch
 
-    with patch.dict(sys.modules, {"langchain": None, "langchain.callbacks.base": None}):
+    blocked = {
+        "langchain": None,
+        "langchain.callbacks": None,
+        "langchain.callbacks.base": None,
+        "langchain_core": None,
+        "langchain_core.callbacks": None,
+        "langchain_core.callbacks.base": None,
+    }
+    with patch.dict(sys.modules, blocked):
         from sensu.integrations.langchain import SensuCallbackHandler
         client = make_client()
         with pytest.raises(ImportError, match="langchain"):
@@ -289,3 +301,121 @@ async def test_langchain_handler_retry_detection() -> None:
         if e["event_type"] == "tool.call.started" and e.get("retry_of")
     ]
     assert retry_events, "Second call should be flagged as a retry"
+
+
+@pytest.mark.asyncio
+async def test_langchain_handler_llm_model_provider_carry_forward() -> None:
+    """on_llm_end must preserve the model + provider captured at start (not 'unknown')."""
+    pytest.importorskip("langchain")
+    from sensu.integrations.langchain import SensuCallbackHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuCallbackHandler(client=client)
+    run_id = uuid.uuid4()
+    await handler.on_llm_start({"name": "ChatAnthropic"}, [], run_id=run_id)
+    await handler.on_llm_end(MagicMock(llm_output={}), run_id=run_id)
+
+    end = next(e for e in client._buffer if e["event_type"] == "llm.request.completed")
+    assert end["model"] == "ChatAnthropic"
+    assert end["provider"] == "anthropic"
+    assert end["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_langchain_handler_llm_error_status() -> None:
+    pytest.importorskip("langchain")
+    from sensu.integrations.langchain import SensuCallbackHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuCallbackHandler(client=client)
+    run_id = uuid.uuid4()
+    await handler.on_llm_start({"name": "ChatOpenAI"}, [], run_id=run_id)
+    await handler.on_llm_error(RuntimeError("boom"), run_id=run_id)
+
+    end = next(e for e in client._buffer if e["event_type"] == "llm.request.completed")
+    assert end["status"] == "error"
+    assert end["model"] == "ChatOpenAI"
+    assert end["provider"] == "openai"
+
+
+@pytest.mark.asyncio
+async def test_langchain_handler_is_fallback_after_error() -> None:
+    """The next LLM start after an error must be tagged is_fallback=True."""
+    pytest.importorskip("langchain")
+    from sensu.integrations.langchain import SensuCallbackHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuCallbackHandler(client=client)
+
+    rid_a = uuid.uuid4()
+    await handler.on_llm_start({"name": "ChatOpenAI"}, [], run_id=rid_a)
+    await handler.on_llm_error(RuntimeError("boom"), run_id=rid_a)
+
+    rid_b = uuid.uuid4()
+    await handler.on_llm_start({"name": "ChatAnthropic"}, [], run_id=rid_b)
+
+    fallback = next(
+        e for e in client._buffer
+        if e["event_type"] == "llm.request.started" and e.get("is_fallback")
+    )
+    assert fallback["model"] == "ChatAnthropic"
+
+
+@pytest.mark.asyncio
+async def test_langchain_handler_streaming_emits_every_tenth_token() -> None:
+    pytest.importorskip("langchain")
+    from sensu.integrations.langchain import SensuCallbackHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuCallbackHandler(client=client)
+    run_id = uuid.uuid4()
+    await handler.on_llm_start({"name": "ChatAnthropic"}, [], run_id=run_id)
+    for _ in range(25):
+        await handler.on_llm_new_token("x", run_id=run_id)
+
+    stream_events = [e for e in client._buffer if e["event_type"] == "stream.token.received"]
+    # STREAM_EMIT_EVERY = 10 → events at 10 and 20
+    assert len(stream_events) == 2
+    assert stream_events[0]["tokens_so_far"] == 10
+    assert stream_events[1]["tokens_so_far"] == 20
+
+
+@pytest.mark.asyncio
+async def test_langchain_handler_base_fields_on_every_event() -> None:
+    pytest.importorskip("langchain")
+    from sensu.integrations.langchain import SensuCallbackHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuCallbackHandler(client=client, session_id="s-1", run_id="r-1")
+    await handler.on_chain_start({}, {}, run_id=uuid.uuid4())
+    await handler.on_llm_start({"name": "ChatAnthropic"}, [], run_id=uuid.uuid4())
+
+    for ev in client._buffer:
+        for k in ("event_id", "timestamp", "org_id", "agent_id", "session_id", "run_id", "trace_id", "span_id"):
+            assert k in ev, f"missing {k!r} on {ev['event_type']}"
+        assert ev["session_id"] == "s-1"
+        assert ev["run_id"] == "r-1"
+
+
+@pytest.mark.asyncio
+async def test_langchain_handler_chain_step_lifecycle() -> None:
+    pytest.importorskip("langchain")
+    from sensu.integrations.langchain import SensuCallbackHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuCallbackHandler(client=client)
+    rid = uuid.uuid4()
+    await handler.on_chain_start({}, {}, run_id=rid)
+    started = next(e for e in client._buffer if e["event_type"] == "agent.step.started")
+    assert started["step_type"] == "chain"
+    assert started["step_id"]
+
+    await handler.on_chain_end({}, run_id=rid)
+    completed = next(e for e in client._buffer if e["event_type"] == "agent.step.completed")
+    assert completed.get("step_id") == started["step_id"]

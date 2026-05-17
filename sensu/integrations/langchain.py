@@ -1,12 +1,23 @@
 """
 LangChain callback handler for Sensu telemetry.
 
-STATUS: Work in progress — mirrors the TypeScript LangChain integration.
+Drop into any LangChain chain, agent, or LLM via the ``callbacks`` list to
+capture LLM calls, tool calls, streaming TTFT, retry/fallback chains, and
+chain step boundaries automatically.
 
-Usage:
-    from sensu.integrations.langchain import SensuCallbackHandler
-    handler = SensuCallbackHandler(client=sensu_client)
-    chain = LLMChain(..., callbacks=[handler])
+Usage::
+
+    from sensu import SensuClient, SensuCallbackHandler
+
+    client = SensuClient({"from_env": True})
+    handler = SensuCallbackHandler(client=client)
+
+    chain = LLMChain(llm=llm, prompt=prompt, callbacks=[handler])
+    await chain.ainvoke({"input": user_message})
+
+Requires the ``langchain`` extra::
+
+    pip install 'sensu-sdk[langchain]'
 """
 from __future__ import annotations
 
@@ -62,13 +73,22 @@ class SensuCallbackHandler:
         session_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> None:
-        try:
-            from langchain.callbacks.base import BaseCallbackHandler as _Base  # noqa: F401
-        except ImportError as exc:
+        # LangChain 1.x moved BaseCallbackHandler to `langchain_core.callbacks.base`.
+        # Older 0.x releases still have it at `langchain.callbacks.base`. Accept either
+        # so customers on either major version can use this handler.
+        _err: Optional[ImportError] = None
+        for _module in ("langchain_core.callbacks.base", "langchain.callbacks.base"):
+            try:
+                __import__(_module, fromlist=["BaseCallbackHandler"])
+                _err = None
+                break
+            except ImportError as exc:
+                _err = exc
+        if _err is not None:
             raise ImportError(
                 "langchain is required for SensuCallbackHandler. "
                 "Install with: pip install 'sensu-sdk[langchain]'"
-            ) from exc
+            ) from _err
 
         self.client = client
         self._session_id = session_id or _new_id()
@@ -82,10 +102,15 @@ class SensuCallbackHandler:
         self._first_token_times: Dict[str, float] = {}
         self._stream_token_counts: Dict[str, int] = {}
         self._llm_call_ids: Dict[str, str] = {}
+        # Carry model + provider from start to end so completion events aren't 'unknown'.
+        self._llm_models: Dict[str, str] = {}
+        self._llm_providers: Dict[str, str] = {}
         self._tool_call_ids: Dict[str, str] = {}
         self._tool_names: Dict[str, str] = {}
         self._last_tool_call_id_by_name: Dict[str, str] = {}
         self._failed_tool_call_ids: Set[str] = set()
+        # When the previous LLM call errored, the next start is tagged is_fallback.
+        self._last_llm_errored: bool = False
 
     def _base(self, span_id: Optional[str] = None) -> Dict[str, Any]:
         return {
@@ -135,14 +160,26 @@ class SensuCallbackHandler:
         self._llm_call_ids[rid] = llm_call_id
         self._stream_token_counts.pop(rid, None)
         self._first_token_times.pop(rid, None)
+
+        is_fallback = self._last_llm_errored
+        self._last_llm_errored = False
+
         name: str = (serialized or {}).get("name", "")
-        self.client.enqueue({
+        model = name or "unknown"
+        provider = _infer_provider(name)
+        self._llm_models[rid] = model
+        self._llm_providers[rid] = provider
+
+        evt: Dict[str, Any] = {
             **self._base(),
             "event_type": "llm.request.started",
             "llm_call_id": llm_call_id,
-            "provider": _infer_provider(name),
-            "model": name or "unknown",
-        })
+            "provider": provider,
+            "model": model,
+        }
+        if is_fallback:
+            evt["is_fallback"] = True
+        self.client.enqueue(evt)
 
     async def on_llm_new_token(self, token: str, *, run_id: Any, **kwargs: Any) -> None:
         rid = str(run_id)
@@ -168,8 +205,11 @@ class SensuCallbackHandler:
         latency_ms = (time.monotonic() * 1000 - start_ms) if start_ms else None
         first_ms = self._first_token_times.pop(rid, None)
         ttft = (first_ms - start_ms) if (start_ms and first_ms) else None
+        is_streamed = rid in self._stream_token_counts
         self._stream_token_counts.pop(rid, None)
         llm_call_id = self._llm_call_ids.pop(rid, None)
+        model = self._llm_models.pop(rid, "unknown")
+        provider = self._llm_providers.pop(rid, "langchain")
 
         llm_output = getattr(response, "llm_output", None) or {}
         token_usage = (llm_output.get("tokenUsage") or {}) if isinstance(llm_output, dict) else {}
@@ -178,10 +218,11 @@ class SensuCallbackHandler:
             **self._base(),
             "event_type": "llm.request.completed",
             "llm_call_id": llm_call_id,
-            "provider": "langchain",
-            "model": "unknown",
+            "provider": provider,
+            "model": model,
             "latency_ms": latency_ms,
             "ttft_ms": ttft,
+            "streamed": is_streamed,
             "status": "success",
             "input_tokens": token_usage.get("promptTokens"),
             "output_tokens": token_usage.get("completionTokens"),
@@ -195,12 +236,15 @@ class SensuCallbackHandler:
         self._first_token_times.pop(rid, None)
         self._stream_token_counts.pop(rid, None)
         llm_call_id = self._llm_call_ids.pop(rid, None)
+        model = self._llm_models.pop(rid, "unknown")
+        provider = self._llm_providers.pop(rid, "langchain")
+        self._last_llm_errored = True
         self.client.enqueue({
             **self._base(),
             "event_type": "llm.request.completed",
             "llm_call_id": llm_call_id,
-            "provider": "langchain",
-            "model": "unknown",
+            "provider": provider,
+            "model": model,
             "latency_ms": latency_ms,
             "status": "error",
         })

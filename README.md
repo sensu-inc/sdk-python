@@ -51,6 +51,56 @@ async def chat():
         )
 ```
 
+## LangChain
+
+Drop the Sensu callback handler into any LangChain chain, agent, or LLM.
+Chain boundaries, LLM calls (with streaming TTFT and retry/fallback
+detection), and tool calls are captured automatically. Compatible with
+LangChain 0.x and 1.x.
+
+```python
+import sensu
+from langchain_anthropic import ChatAnthropic
+from langchain_core.prompts import ChatPromptTemplate
+
+client = sensu.SensuClient({"from_env": True})
+handler = sensu.SensuCallbackHandler(client=client)
+
+prompt = ChatPromptTemplate.from_messages([("human", "{question}")])
+llm = ChatAnthropic(model="claude-sonnet-4-6")
+chain = prompt | llm
+
+result = await chain.ainvoke(
+    {"question": "What is observability?"},
+    config={"callbacks": [handler]},
+)
+```
+
+**Tying events to a specific run.** Pass `session_id` and `run_id`
+explicitly to correlate LangChain telemetry with a run started elsewhere:
+
+```python
+run = client.start_run({"session_id": "user-session-1"})
+handler = sensu.SensuCallbackHandler(
+    client=client,
+    session_id="user-session-1",
+    run_id=run.run_id,
+)
+```
+
+**What's captured.** Chain start/end → `agent.step.*`; LLM start/end/error
+→ `llm.request.*` (provider, model, tokens, latency, TTFT); streaming
+tokens → `stream.token.received` every 10th token; tool start/end/error
+→ `tool.call.*` with `retry_of` when the same tool re-invokes after error
+and `is_fallback` on the next LLM after an error.
+
+**Limitations.** LangChain's callback interface exposes aggregate token
+counts only — per-role context breakdown is not surfaced through this
+path. For context-window analysis, use the low-level `track_llm()` /
+`record_llm()` APIs directly.
+
+Requires the `langchain` extra (`pip install 'sensu-sdk[langchain]'`).
+
 ## Environment variables
 
 | Variable | Description |
