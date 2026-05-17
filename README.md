@@ -11,6 +11,7 @@ pip install sensu-sdk                    # core
 pip install "sensu-sdk[anthropic]"       # + Anthropic auto-tracking
 pip install "sensu-sdk[openai]"          # + OpenAI auto-tracking
 pip install "sensu-sdk[langchain]"       # + LangChain callback handler
+pip install "sensu-sdk[langgraph]"       # + LangGraph node-aware handler
 pip install "sensu-sdk[all]"             # everything
 ```
 
@@ -100,6 +101,54 @@ path. For context-window analysis, use the low-level `track_llm()` /
 `record_llm()` APIs directly.
 
 Requires the `langchain` extra (`pip install 'sensu-sdk[langchain]'`).
+
+## LangGraph
+
+Building agentic workflows with [LangGraph](https://langchain-ai.github.io/langgraph/)?
+Use `SensuLangGraphHandler` to get per-node steps in the Sensu trace tree.
+Each node execution emits an `agent.step.started` event with
+`step_type='langgraph_node'` and the node name; the internal `ChannelWrite`
+plumbing wrappers (tagged `langsmith:hidden` by LangGraph) are filtered out
+so the event stream stays clean.
+
+```python
+import sensu
+from langgraph.graph import StateGraph, START, END
+
+client = sensu.SensuClient({"from_env": True})
+handler = sensu.SensuLangGraphHandler(client=client)
+
+graph = (
+    StateGraph(MyState)
+    .add_node("plan_step", planner_node)
+    .add_node("research_step", researcher_node)
+    .add_node("write_step", writer_node)
+    .add_edge(START, "plan_step")
+    .add_edge("plan_step", "research_step")
+    .add_edge("research_step", "write_step")
+    .add_edge("write_step", END)
+    .compile()
+)
+
+result = await graph.ainvoke(
+    {"topic": "observability"},
+    config={"callbacks": [handler]},
+)
+```
+
+**What's added beyond the LangChain handler.** A node execution emits
+`step_type='langgraph_node'` (vs `'chain'`), with extra fields:
+
+- `node_name` — the `add_node()` name (e.g. `"plan_step"`)
+- `langgraph_step` — LangGraph's monotonic step counter (when emitted)
+
+Everything else — LLM calls, tool calls, streaming TTFT, retry/fallback —
+works identically to the LangChain integration, because `SensuLangGraphHandler`
+subclasses `SensuCallbackHandler`. Mixed LangChain + LangGraph projects work
+with either handler; the parent class auto-detects LangGraph nodes from the
+callback metadata too.
+
+Requires the `langgraph` extra (`pip install 'sensu-sdk[langgraph]'`).
 
 ## Environment variables
 

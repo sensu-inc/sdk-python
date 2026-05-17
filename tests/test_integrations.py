@@ -419,3 +419,128 @@ async def test_langchain_handler_chain_step_lifecycle() -> None:
     await handler.on_chain_end({}, run_id=rid)
     completed = next(e for e in client._buffer if e["event_type"] == "agent.step.completed")
     assert completed.get("step_id") == started["step_id"]
+
+
+# ---------------------------------------------------------------------------
+# LangGraph (Phase B)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_langgraph_handler_basic_identity() -> None:
+    pytest.importorskip("langchain")
+    from sensu.integrations.langgraph import SensuLangGraphHandler
+
+    client = make_client()
+    handler = SensuLangGraphHandler(client=client)
+    assert handler.name == "sensu_langgraph_handler"
+
+
+@pytest.mark.asyncio
+async def test_langgraph_node_detection_in_chain_start() -> None:
+    pytest.importorskip("langchain")
+    from sensu.integrations.langgraph import SensuLangGraphHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuLangGraphHandler(client=client)
+    await handler.on_chain_start(
+        {},
+        {},
+        run_id=uuid.uuid4(),
+        tags=["graph:step:1"],
+        metadata={"langgraph_node": "researcher", "langgraph_step": 2},
+    )
+    evt = next(e for e in client._buffer if e["event_type"] == "agent.step.started")
+    assert evt["step_type"] == "langgraph_node"
+    assert evt["node_name"] == "researcher"
+    assert evt["langgraph_step"] == 2
+
+
+@pytest.mark.asyncio
+async def test_langgraph_handler_fallback_to_chain_when_no_metadata() -> None:
+    pytest.importorskip("langchain")
+    from sensu.integrations.langgraph import SensuLangGraphHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuLangGraphHandler(client=client)
+    await handler.on_chain_start({}, {}, run_id=uuid.uuid4())
+    evt = next(e for e in client._buffer if e["event_type"] == "agent.step.started")
+    assert evt["step_type"] == "chain"
+    assert "node_name" not in evt
+
+
+@pytest.mark.asyncio
+async def test_langgraph_skips_langsmith_hidden_wrappers() -> None:
+    """Channel-write wrappers tagged `langsmith:hidden` must not emit."""
+    pytest.importorskip("langchain")
+    from sensu.integrations.langgraph import SensuLangGraphHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuLangGraphHandler(client=client)
+    rid = uuid.uuid4()
+    await handler.on_chain_start(
+        {},
+        {},
+        run_id=rid,
+        tags=["langsmith:hidden"],
+        metadata={"langgraph_node": "plan_step", "langgraph_step": 0},
+    )
+    # And the matching end is also a no-op
+    await handler.on_chain_end({}, run_id=rid)
+    assert client._buffer == []
+
+
+@pytest.mark.asyncio
+async def test_langgraph_plain_chain_with_hidden_tag_but_no_node_still_emits() -> None:
+    pytest.importorskip("langchain")
+    from sensu.integrations.langgraph import SensuLangGraphHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuLangGraphHandler(client=client)
+    await handler.on_chain_start(
+        {}, {}, run_id=uuid.uuid4(), tags=["langsmith:hidden"], metadata=None,
+    )
+    # Without langgraph_node in metadata, we don't have a clear plumbing
+    # signal, so we fall through to a normal chain step.
+    evt = next(e for e in client._buffer if e["event_type"] == "agent.step.started")
+    assert evt["step_type"] == "chain"
+
+
+@pytest.mark.asyncio
+async def test_langgraph_parent_handler_auto_detects_nodes() -> None:
+    """Customers using just SensuCallbackHandler in a mixed project should
+    still get langgraph_node steps — detection lives in the parent."""
+    pytest.importorskip("langchain")
+    from sensu.integrations.langchain import SensuCallbackHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuCallbackHandler(client=client)
+    await handler.on_chain_start(
+        {}, {}, run_id=uuid.uuid4(), metadata={"langgraph_node": "analyst"},
+    )
+    evt = next(e for e in client._buffer if e["event_type"] == "agent.step.started")
+    assert evt["step_type"] == "langgraph_node"
+    assert evt["node_name"] == "analyst"
+
+
+@pytest.mark.asyncio
+async def test_langgraph_node_end_uses_same_step_id() -> None:
+    pytest.importorskip("langchain")
+    from sensu.integrations.langgraph import SensuLangGraphHandler
+    import uuid
+
+    client = make_client()
+    handler = SensuLangGraphHandler(client=client)
+    rid = uuid.uuid4()
+    await handler.on_chain_start(
+        {}, {}, run_id=rid, metadata={"langgraph_node": "writer"},
+    )
+    await handler.on_chain_end({}, run_id=rid)
+    started = next(e for e in client._buffer if e["event_type"] == "agent.step.started")
+    completed = next(e for e in client._buffer if e["event_type"] == "agent.step.completed")
+    assert completed["step_id"] == started["step_id"]

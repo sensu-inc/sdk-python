@@ -29,6 +29,20 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Set
 if TYPE_CHECKING:
     from sensu._client import SensuClient
 
+# Module-load import of BaseCallbackHandler. Accepts both LangChain 1.x
+# (`langchain_core.callbacks.base`) and 0.x (`langchain.callbacks.base`).
+# Without this base class, LangChain's runtime silently rejects the handler
+# and every `callbacks=[handler]` becomes a no-op. Falls back to `object`
+# only so the module can be imported in environments without langchain —
+# the constructor will then raise a clear ImportError.
+try:
+    from langchain_core.callbacks.base import BaseCallbackHandler as _BaseCallbackHandler
+except ImportError:
+    try:
+        from langchain.callbacks.base import BaseCallbackHandler as _BaseCallbackHandler  # type: ignore[no-redef]
+    except ImportError:
+        _BaseCallbackHandler = object  # type: ignore[assignment,misc]
+
 
 def _infer_provider(name: str) -> str:
     n = name.lower()
@@ -57,12 +71,20 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-class SensuCallbackHandler:
+class SensuCallbackHandler(_BaseCallbackHandler):  # type: ignore[misc,valid-type]
     """
     LangChain BaseCallbackHandler subclass that emits Sensu telemetry events.
 
     Requires: pip install 'sensu-sdk[langchain]'
     """
+
+    # Surfaced in LangChain's debug output and trace dumps.
+    name = "sensu_callback_handler"
+    # Required by BaseCallbackHandler — fire callbacks inline (we don't need
+    # the async manager to thread them) and don't re-raise errors so a
+    # misbehaving Sensu emit can't crash the customer's chain.
+    run_inline = True
+    raise_error = False
 
     STREAM_EMIT_EVERY = 10
 
@@ -73,22 +95,17 @@ class SensuCallbackHandler:
         session_id: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> None:
-        # LangChain 1.x moved BaseCallbackHandler to `langchain_core.callbacks.base`.
-        # Older 0.x releases still have it at `langchain.callbacks.base`. Accept either
-        # so customers on either major version can use this handler.
-        _err: Optional[ImportError] = None
-        for _module in ("langchain_core.callbacks.base", "langchain.callbacks.base"):
-            try:
-                __import__(_module, fromlist=["BaseCallbackHandler"])
-                _err = None
-                break
-            except ImportError as exc:
-                _err = exc
-        if _err is not None:
+        # Detect the fallback path where neither
+        # `langchain_core.callbacks.base` nor `langchain.callbacks.base` was
+        # importable at module load — the class is then effectively `object`
+        # and LangChain's runtime would reject the handler.
+        if _BaseCallbackHandler is object:
             raise ImportError(
                 "langchain is required for SensuCallbackHandler. "
                 "Install with: pip install 'sensu-sdk[langchain]'"
-            ) from _err
+            )
+        # The BaseCallbackHandler superclass has no required __init__ args.
+        super().__init__()
 
         self.client = client
         self._session_id = session_id or _new_id()
@@ -111,6 +128,10 @@ class SensuCallbackHandler:
         self._failed_tool_call_ids: Set[str] = set()
         # When the previous LLM call errored, the next start is tagged is_fallback.
         self._last_llm_errored: bool = False
+        # Chain starts we deliberately skipped (LangGraph internal channel-write
+        # wrappers tagged `langsmith:hidden`). Their matching on_chain_end is
+        # also a no-op so no dangling agent.step.completed fires.
+        self._skipped_run_ids: Set[str] = set()
 
     def _base(self, span_id: Optional[str] = None) -> Dict[str, Any]:
         return {
@@ -127,21 +148,51 @@ class SensuCallbackHandler:
     # -- Chain ---------------------------------------------------------------
 
     async def on_chain_start(
-        self, serialized: Any, inputs: Any, *, run_id: Any, **kwargs: Any
+        self,
+        serialized: Any,
+        inputs: Any,
+        *,
+        run_id: Any,
+        tags: Optional[list] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> None:
-        step_id = _new_id()
         rid = str(run_id)
+
+        # LangGraph node detection — populated only when running inside a graph.
+        langgraph_node: Optional[str] = (metadata or {}).get("langgraph_node")
+        langgraph_step: Optional[int] = (metadata or {}).get("langgraph_step")
+        is_hidden: bool = bool(tags and "langsmith:hidden" in tags)
+
+        # LangGraph nests each node execution inside one or more channel-write
+        # wrappers that share the `langgraph_node` metadata but are tagged
+        # hidden. Skip them — but remember the runId so the matching
+        # on_chain_end is also a no-op rather than emitting a dangling event.
+        if is_hidden and langgraph_node:
+            self._skipped_run_ids.add(rid)
+            return
+
+        step_id = _new_id()
         self._step_ids[rid] = step_id
-        self.client.enqueue({
+
+        evt: Dict[str, Any] = {
             **self._base(),
             "step_id": step_id,
             "event_type": "agent.step.started",
-            "step_type": "chain",
+            "step_type": "langgraph_node" if langgraph_node else "chain",
             "sequence": 0,
-        })
+        }
+        if langgraph_node:
+            evt["node_name"] = langgraph_node
+            if langgraph_step is not None:
+                evt["langgraph_step"] = langgraph_step
+        self.client.enqueue(evt)
 
     async def on_chain_end(self, outputs: Any, *, run_id: Any, **kwargs: Any) -> None:
         rid = str(run_id)
+        if rid in self._skipped_run_ids:
+            self._skipped_run_ids.discard(rid)
+            return
         step_id = self._step_ids.pop(rid, None)
         self.client.enqueue({
             **self._base(),
