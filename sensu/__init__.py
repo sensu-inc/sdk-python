@@ -27,6 +27,8 @@ Quick start (explicit run/step):
 
 from sensu._client import RunHandle, SensuClient, StepHandle
 from sensu._types import (
+    AgentVersion,
+    CandidateConfig,
     ContextBreakdown,
     DeployPromptVersionOptions,
     FeedbackOptions,
@@ -41,6 +43,7 @@ from sensu._types import (
     RecordEvalScoreOptions,
     RecordFeedbackOptions,
     RecordPromptRenderOptions,
+    RegisterAgentVersionOptions,
     ResumeSessionOptions,
     RetrievalChunkInput,
     RunOptions,
@@ -131,6 +134,10 @@ __all__ = [
     "DeployPromptVersionOptions",
     "StartSessionOptions",
     "ResumeSessionOptions",
+    # Eval-gated CI/CD (§5.2)
+    "CandidateConfig",
+    "RegisterAgentVersionOptions",
+    "AgentVersion",
     # Supporting types
     "ContextBreakdown",
     "MessageSnapshotItem",

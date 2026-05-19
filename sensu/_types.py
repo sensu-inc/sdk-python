@@ -264,6 +264,40 @@ class ScoreOptions(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
+# Eval-gated CI/CD (§5.2) — agent versions registry
+# ---------------------------------------------------------------------------
+
+
+class CandidateConfig(TypedDict, total=False):
+    """Candidate config registered under an agent version. Mirrors the API's
+    CandidateConfig shape — system_prompt is required, model is optional
+    (defaults to the sampled run's source model at gate time)."""
+    # required
+    system_prompt: str
+    # optional
+    model: str
+
+
+class RegisterAgentVersionOptions(TypedDict, total=False):
+    """Options for ``client.register_agent_version()``."""
+    # required — customer-facing agent name (server prepends org id)
+    agent_id: str
+    # required — opaque identifier (usually a git commit SHA)
+    sha: str
+    # required
+    config: CandidateConfig
+
+
+class AgentVersion(TypedDict):
+    """Server response shape for a registered agent version."""
+    id: str
+    agentId: str
+    sha: str
+    config: CandidateConfig
+    createdAt: str
+
+
+# ---------------------------------------------------------------------------
 # Multi-agent
 # ---------------------------------------------------------------------------
 

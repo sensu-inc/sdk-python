@@ -14,6 +14,8 @@ import httpx
 
 from sensu._pricing import estimate_cost, resolve_pricing
 from sensu._types import (
+    AgentVersion,
+    CandidateConfig,
     ContextBreakdown,
     DeployPromptVersionOptions,
     GuardrailResult,
@@ -27,6 +29,7 @@ from sensu._types import (
     RecordEvalScoreOptions,
     RecordFeedbackOptions,
     RecordPromptRenderOptions,
+    RegisterAgentVersionOptions,
     ScoreOptions,
     ResumeSessionOptions,
     SpawnRunOptions,
@@ -863,6 +866,47 @@ class SensuClient:
             return resp.json()
         except Exception as e:
             warnings.warn(f"[sensu] score network error: {e}")
+            return None
+
+    async def register_agent_version(
+        self, opts: "RegisterAgentVersionOptions",
+    ) -> Optional[Dict[str, Any]]:
+        """Register a candidate config used at a given commit so eval-gate
+        checks (§5.2) can reference it as ``versionId`` instead of inlining
+        the full config in every request. Run-less helper.
+
+        Hits ``POST /api/v1/agents/:id/versions`` directly. Returns the
+        parsed JSON response (AgentVersion dict) or None on failure.
+
+        Customers typically call this from their deploy step:
+
+            await sensu.register_agent_version({
+                "agent_id": "cust-support-v3",
+                "sha":      os.environ["GITHUB_SHA"],
+                "config":   {"system_prompt": PROMPT, "model": "claude-sonnet-4-6"},
+            })
+        """
+        if self.disabled or not self._api_key or self._async_http is None:
+            return None
+        from urllib.parse import quote
+        agent_id = opts.get("agent_id")
+        if not agent_id:
+            warnings.warn("[sensu] register_agent_version: agent_id is required")
+            return None
+        try:
+            resp = await self._async_http.post(
+                f"{self._base_url}/api/v1/agents/{quote(agent_id, safe='')}/versions",
+                json={"sha": opts["sha"], "config": opts["config"]},
+                headers={"Content-Type": "application/json", "X-API-Key": self._api_key},
+            )
+            if resp.status_code >= 400:
+                warnings.warn(
+                    f"[sensu] register_agent_version failed {resp.status_code}: {resp.text}",
+                )
+                return None
+            return resp.json()
+        except Exception as e:
+            warnings.warn(f"[sensu] register_agent_version network error: {e}")
             return None
 
     def _atexit_flush(self) -> None:
