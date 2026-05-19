@@ -1,5 +1,22 @@
 # `sensu-sdk` (Python) changelog
 
+## 0.12.0 — 2026-05-19
+
+### Added — agent version registry for eval-gated CI/CD (§5.2)
+
+- **`client.register_agent_version({...})`** — new run-less async
+  helper that wraps `POST /api/v1/agents/:id/versions`. Lets
+  customers register the candidate config (system prompt + optional
+  model) used at a given commit, then reference the returned
+  versionId from the Sensu eval-gate Action instead of inlining the
+  full config in every PR check.
+- New exported TypedDicts: `CandidateConfig`,
+  `RegisterAgentVersionOptions`, `AgentVersion`.
+- Owner/admin role required server-side (the registration represents
+  a deploy fact); an API key with `full` scope works as expected. See
+  the platform repo's `planning/EVAL_GATED_CI_PLAN.md` PR 5 for the
+  matching backend.
+
 ## 0.8.0 — 2026-05-13
 
 ### Added — per-call tool I/O body capture
