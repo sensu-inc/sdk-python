@@ -8,7 +8,7 @@ import threading
 import time
 import warnings
 from contextvars import ContextVar
-from typing import Any, Callable, Coroutine, Dict, List, Literal, Optional, Tuple, TypeVar
+from typing import Any, Callable, Coroutine, Dict, List, Literal, Optional, Set, Tuple, TypeVar
 
 import httpx
 
@@ -726,6 +726,9 @@ class SensuClient:
         self._buffer: List[Dict[str, Any]] = []
         self._buffer_lock = threading.Lock()
         self._pricing_cache: Dict[str, Tuple[float, float]] = {}
+        # Set of "provider:model" keys we've already warned about for live
+        # pricing failures. Keeps logs quiet under repeated failures.
+        self._warned_pricing_misses: Set[str] = set()
         self._run_tool_counts: Dict[str, Dict[str, int]] = {}
         self._flush_task: Optional[asyncio.Task[None]] = None
         self._stopped = False
@@ -1157,6 +1160,7 @@ class SensuClient:
             cache=self._pricing_cache,
             disable_live_pricing=self._disable_live_pricing,
             disabled=self.disabled,
+            warned=self._warned_pricing_misses,
         )
 
     # -- Session management --------------------------------------------------

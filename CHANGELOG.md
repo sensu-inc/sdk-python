@@ -1,5 +1,37 @@
 # `sensu-sdk` (Python) changelog
 
+## 0.12.1 — 2026-05-20
+
+### Changed — surface pricing failures via UserWarning
+
+The pricing resolver already returned `(0.0, 0.0)` on API failure
+(unlike sdk-ts and sdk-go, Python never shipped a bundled fallback).
+The platform [SDK_CONSOLIDATION_PLAN.md §3c](https://github.com/sensu-inc/sensu/blob/main/planning/SDK_CONSOLIDATION_PLAN.md)
+formalizes that behavior as the new design across all three SDKs.
+This release surfaces the failure so customers can tell when costs
+are zeros:
+
+- `resolve_pricing()` now emits a `UserWarning` on each failure path
+  (4xx/5xx, network error, 200 with null rates, `disable_live_pricing`,
+  client `disabled`, missing API key) — **at most once per
+  `(provider, model)` per client lifetime** so logs don't spam.
+- The warning message points customers to
+  `POST /api/v1/pricing/org-models` for registering custom-model
+  pricing (the new self-serve path shipped on the platform).
+- New optional `warned: Set[str]` parameter on `resolve_pricing()`
+  (service-level callers that don't pass it get silent sentinels —
+  backward-compatible).
+
+**No behavior change** for callers who already handled `(0.0, 0.0)`
+as "no estimate" — those keep working unchanged. The server's
+ingest pipeline reconciles cost from `llm_calls` + the catalog at
+query time regardless, so dashboards stay correct even when the
+SDK sends 0.
+
+9 new pytest cases covering success cache, 4xx/5xx, network error,
+null-rates, three short-circuit paths, warn-at-most-once semantics,
+and per-(provider, model) warning isolation.
+
 ## 0.12.0 — 2026-05-19
 
 ### Added — agent version registry for eval-gated CI/CD (§5.2)
