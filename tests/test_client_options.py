@@ -46,6 +46,7 @@ def test_typeddict_declares_all_expected_options() -> None:
         "on_loop_detected", "loop_threshold",
         "disable_live_pricing", "debug_mode",
         "capture_message_bodies",  # new in Phase 2 PR 2
+        "pricing_cache_ttl_ms",    # new in 0.12.3 (cache TTL)
     }
     missing = expected - set(hints)
     assert not missing, f"SensuClientOptions missing keys: {missing}"

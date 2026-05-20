@@ -39,6 +39,17 @@ class SensuClientOptions(TypedDict, total=False):
     on_loop_detected: Callable[[str, int], None]
     loop_threshold: int
     disable_live_pricing: bool
+    # How long the SDK caches resolved per-(provider, model) pricing
+    # before refetching from the Sensu API. After expiry the next
+    # resolve_pricing() call hits the live endpoint and replaces the
+    # cached entry. Set 0 to disable caching entirely (every tracked
+    # LLM call fetches pricing fresh). Long-running services should keep
+    # this short enough that pricing changes propagate within the
+    # freshness window your dashboards depend on. Short-lived processes
+    # (CLI, Lambda) effectively get fresh pricing per invocation
+    # regardless. Default: 3_600_000 (1 hour). Parity with sdk-ts
+    # (pricingCacheTtlMs) and sdk-go (PricingCacheTTLMs).
+    pricing_cache_ttl_ms: float
     debug_mode: bool
     # When True, llm.message_snapshot events carry raw message bodies in
     # addition to token counts. The server masks PII at ingest; raw

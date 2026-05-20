@@ -1,5 +1,30 @@
 # `sensu-sdk` (Python) changelog
 
+## 0.12.3 — 2026-05-20
+
+### Added — pricing cache TTL
+
+New `pricing_cache_ttl_ms` option on `SensuClientOptions`. Default
+**1 hour** (3,600,000 ms). After expiry the next `resolve_pricing()`
+call refetches from the live API and replaces the cached entry. Set
+`0` to disable caching entirely.
+
+Parity with sdk-ts `pricingCacheTtlMs` and sdk-go
+`PricingCacheTTLMs`. Closes v1.1 follow-on #1 from
+[`[DONE]_SDK_CONSOLIDATION_PLAN.md` §9](https://github.com/sensu-inc/sensu/blob/main/planning/%5BDONE%5D_SDK_CONSOLIDATION_PLAN.md).
+
+`resolve_pricing()` also gains an optional `now_monotonic: float`
+parameter for deterministic TTL testing without monkey-patching
+`time.monotonic()`. Production callers leave it `None` (default
+`time.monotonic()` is used).
+
+5 new pytest cases covering TTL expiry, rate updates across the
+expiry boundary, `cache_ttl_ms=0` disables caching, per-(provider,
+model) independence, and client → resolver round-trip with default
++ custom + zero values.
+
+Patch bump: 0.12.2 → 0.12.3.
+
 ## 0.12.2 — 2026-05-20
 
 ### Fixed — capture_message_bodies missing from SensuClientOptions TypedDict

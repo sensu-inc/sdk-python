@@ -190,7 +190,7 @@ async def test_different_models_warn_independently() -> None:
 async def test_warned_set_is_optional_for_backward_compat() -> None:
     """Service-level callers that don't supply ``warned`` still get the
     sentinel and don't raise — warnings are silently skipped."""
-    cache: Dict[str, Tuple[float, float]] = {}
+    cache: Dict[str, Tuple[Tuple[float, float], float]] = {}
     with _patch_httpx_get(_make_resp(500)):
         result = await resolve_pricing(
             "anthropic", "claude-opus-4-7",
@@ -198,3 +198,159 @@ async def test_warned_set_is_optional_for_backward_compat() -> None:
             cache=cache, disable_live_pricing=False, disabled=False,
         )
     assert result == (0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Cache TTL — uses now_monotonic injection for deterministic time travel
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cache_refetches_after_ttl_expires() -> None:
+    cache: Dict[str, Tuple[Tuple[float, float], float]] = {}
+    resp = _make_resp(200, {"inputPricePer1mTokens": 15, "outputPricePer1mTokens": 75})
+
+    # First call at t=0, second at t=59s (within 60s TTL — cache hit).
+    with _patch_httpx_get(resp) as client_cls:
+        await resolve_pricing(
+            "anthropic", "claude-opus-4-7",
+            base_url="http://localhost", api_key="k",
+            cache=cache, disable_live_pricing=False, disabled=False,
+            cache_ttl_ms=60_000.0, now_monotonic=0.0,
+        )
+    with _patch_httpx_get(resp) as client_cls_2:
+        await resolve_pricing(
+            "anthropic", "claude-opus-4-7",
+            base_url="http://localhost", api_key="k",
+            cache=cache, disable_live_pricing=False, disabled=False,
+            cache_ttl_ms=60_000.0, now_monotonic=59.0,
+        )
+    # Second call hits cache (no second httpx.AsyncClient instantiation).
+    assert client_cls.call_count == 1
+    assert client_cls_2.call_count == 0
+
+    # Third call at t=61s — past TTL → refetch.
+    with _patch_httpx_get(resp) as client_cls_3:
+        await resolve_pricing(
+            "anthropic", "claude-opus-4-7",
+            base_url="http://localhost", api_key="k",
+            cache=cache, disable_live_pricing=False, disabled=False,
+            cache_ttl_ms=60_000.0, now_monotonic=61.0,
+        )
+    assert client_cls_3.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cache_picks_up_updated_rates_on_refetch() -> None:
+    cache: Dict[str, Tuple[Tuple[float, float], float]] = {}
+    with _patch_httpx_get(_make_resp(200, {
+        "inputPricePer1mTokens": 15, "outputPricePer1mTokens": 75,
+    })):
+        before = await resolve_pricing(
+            "anthropic", "claude-opus-4-7",
+            base_url="http://localhost", api_key="k",
+            cache=cache, disable_live_pricing=False, disabled=False,
+            cache_ttl_ms=1_000.0, now_monotonic=0.0,
+        )
+    assert before == (15.0, 75.0)
+
+    # Past TTL, server now returns updated rate.
+    with _patch_httpx_get(_make_resp(200, {
+        "inputPricePer1mTokens": 12, "outputPricePer1mTokens": 60,
+    })):
+        after = await resolve_pricing(
+            "anthropic", "claude-opus-4-7",
+            base_url="http://localhost", api_key="k",
+            cache=cache, disable_live_pricing=False, disabled=False,
+            cache_ttl_ms=1_000.0, now_monotonic=2.0,
+        )
+    assert after == (12.0, 60.0)
+
+
+@pytest.mark.asyncio
+async def test_ttl_zero_disables_caching() -> None:
+    cache: Dict[str, Tuple[Tuple[float, float], float]] = {}
+    resp = _make_resp(200, {"inputPricePer1mTokens": 15, "outputPricePer1mTokens": 75})
+
+    for i in range(5):
+        with _patch_httpx_get(resp) as client_cls:
+            await resolve_pricing(
+                "anthropic", "claude-opus-4-7",
+                base_url="http://localhost", api_key="k",
+                cache=cache, disable_live_pricing=False, disabled=False,
+                cache_ttl_ms=0.0, now_monotonic=float(i),
+            )
+        # Every iteration must have hit the wire (cache is bypassed).
+        assert client_cls.call_count == 1, f"iteration {i} did not refetch"
+
+
+@pytest.mark.asyncio
+async def test_ttl_applies_per_provider_model_independently() -> None:
+    cache: Dict[str, Tuple[Tuple[float, float], float]] = {}
+    resp = _make_resp(200, {"inputPricePer1mTokens": 1, "outputPricePer1mTokens": 2})
+
+    # Prime both cache entries at t=0.
+    for provider, model in [("anthropic", "claude-opus-4-7"), ("openai", "gpt-4o")]:
+        with _patch_httpx_get(resp):
+            await resolve_pricing(
+                provider, model,
+                base_url="http://localhost", api_key="k",
+                cache=cache, disable_live_pricing=False, disabled=False,
+                cache_ttl_ms=60_000.0, now_monotonic=0.0,
+            )
+    assert len(cache) == 2
+
+    # Both within TTL at t=30s — both cache-hit.
+    for provider, model in [("anthropic", "claude-opus-4-7"), ("openai", "gpt-4o")]:
+        with _patch_httpx_get(resp) as client_cls:
+            await resolve_pricing(
+                provider, model,
+                base_url="http://localhost", api_key="k",
+                cache=cache, disable_live_pricing=False, disabled=False,
+                cache_ttl_ms=60_000.0, now_monotonic=30.0,
+            )
+        assert client_cls.call_count == 0
+
+    # Both past TTL at t=90s — both refetch.
+    for provider, model in [("anthropic", "claude-opus-4-7"), ("openai", "gpt-4o")]:
+        with _patch_httpx_get(resp) as client_cls:
+            await resolve_pricing(
+                provider, model,
+                base_url="http://localhost", api_key="k",
+                cache=cache, disable_live_pricing=False, disabled=False,
+                cache_ttl_ms=60_000.0, now_monotonic=90.0,
+            )
+        assert client_cls.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_client_propagates_pricing_cache_ttl_ms() -> None:
+    """SensuClient round-trips pricing_cache_ttl_ms into the resolver and
+    defaults to 3_600_000 (1 hour) when omitted."""
+    from sensu import SensuClient
+
+    default_client = SensuClient({
+        "api_key": "k", "base_url": "http://localhost",
+        "agent_id": "a", "org_id": "o",
+        "batch_size": 100, "flush_interval_ms": 999_999,
+        "disable_live_pricing": True,
+    })
+    assert default_client._pricing_cache_ttl_ms == 3_600_000
+
+    custom_client = SensuClient({
+        "api_key": "k", "base_url": "http://localhost",
+        "agent_id": "a", "org_id": "o",
+        "batch_size": 100, "flush_interval_ms": 999_999,
+        "disable_live_pricing": True,
+        "pricing_cache_ttl_ms": 60_000,
+    })
+    assert custom_client._pricing_cache_ttl_ms == 60_000
+
+    zero_client = SensuClient({
+        "api_key": "k", "base_url": "http://localhost",
+        "agent_id": "a", "org_id": "o",
+        "batch_size": 100, "flush_interval_ms": 999_999,
+        "disable_live_pricing": True,
+        "pricing_cache_ttl_ms": 0,
+    })
+    assert zero_client._pricing_cache_ttl_ms == 0
