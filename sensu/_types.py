@@ -40,6 +40,15 @@ class SensuClientOptions(TypedDict, total=False):
     loop_threshold: int
     disable_live_pricing: bool
     debug_mode: bool
+    # When True, llm.message_snapshot events carry raw message bodies in
+    # addition to token counts. The server masks PII at ingest; raw
+    # bodies stay tenant-side and require an audited unmask to read.
+    # Default: False. See planning/REPLAY_V1_PLAN.md §7 in the platform
+    # repo. Parity with sdk-ts (captureMessageBodies) and sdk-go
+    # (CaptureMessageBodies) — the field was already honored by the
+    # client internally, this declaration just exposes it in the public
+    # TypedDict for type-checker discoverability.
+    capture_message_bodies: bool
 
 
 # ---------------------------------------------------------------------------
