@@ -715,6 +715,8 @@ class SensuClient:
         self._on_loop_detected: Optional[Callable[[str, int], None]] = opts.get("on_loop_detected")
         self._loop_threshold: int = opts.get("loop_threshold", 5)
         self._disable_live_pricing: bool = bool(opts.get("disable_live_pricing", False))
+        # Default 1 hour. Set 0 to disable caching (every call hits the API).
+        self._pricing_cache_ttl_ms: float = float(opts.get("pricing_cache_ttl_ms", 3_600_000))
         self._debug_mode: bool = bool(opts.get("debug_mode", False))
         # When False (default), the SDK strips `body` from every message
         # snapshot before flushing. Setting True opts the org into the
@@ -725,7 +727,10 @@ class SensuClient:
 
         self._buffer: List[Dict[str, Any]] = []
         self._buffer_lock = threading.Lock()
-        self._pricing_cache: Dict[str, Tuple[float, float]] = {}
+        # Cache value shape: (rates_tuple, time.monotonic() timestamp).
+        # Entries older than _pricing_cache_ttl_ms are treated as misses
+        # on read (see _pricing.resolve_pricing).
+        self._pricing_cache: Dict[str, Tuple[Tuple[float, float], float]] = {}
         # Set of "provider:model" keys we've already warned about for live
         # pricing failures. Keeps logs quiet under repeated failures.
         self._warned_pricing_misses: Set[str] = set()
@@ -1161,6 +1166,7 @@ class SensuClient:
             disable_live_pricing=self._disable_live_pricing,
             disabled=self.disabled,
             warned=self._warned_pricing_misses,
+            cache_ttl_ms=self._pricing_cache_ttl_ms,
         )
 
     # -- Session management --------------------------------------------------
