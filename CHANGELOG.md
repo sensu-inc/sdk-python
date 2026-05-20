@@ -1,5 +1,44 @@
 # `sensu-sdk` (Python) changelog
 
+## 0.12.2 — 2026-05-20
+
+### Fixed — capture_message_bodies missing from SensuClientOptions TypedDict
+
+The runtime client has always honored `capture_message_bodies` (see
+[REPLAY_V1_PLAN.md §7](https://github.com/sensu-inc/sensu/blob/main/planning/REPLAY_V1_PLAN.md)
+in the platform repo) but the field was missing from the public
+`SensuClientOptions` TypedDict — so mypy/pyright didn't surface it
+in autocomplete, and customers had to discover it from internals.
+
+Caught during the cross-SDK parity audit
+([SDK_CONSOLIDATION_PLAN.md](https://github.com/sensu-inc/sensu/blob/main/planning/SDK_CONSOLIDATION_PLAN.md)
+Phase 2 PR 2) — sdk-ts and sdk-go both exposed the option in their
+public type, Python was the outlier.
+
+**Behavior:** unchanged. Existing code that passed the option keeps
+working; code that didn't was already getting the `False` default.
+This release just makes the option discoverable.
+
+```python
+client = sensu.SensuClient({
+    "api_key": "...",
+    "capture_message_bodies": True,  # now type-checked
+})
+```
+
+5 new pytest cases in `tests/test_client_options.py`:
+- TypedDict declares `capture_message_bodies` (load-bearing
+  type-checker discoverability assertion + sentinel against
+  accidental removal)
+- TypedDict declares the full expected key set (drift sentinel)
+- runtime round-trip True / False
+- runtime default False
+
+25/25 pass across capture_message_bodies + pricing + client_options +
+register_agent_version. No regressions.
+
+Patch bump: 0.12.1 → 0.12.2.
+
 ## 0.12.1 — 2026-05-20
 
 ### Changed — surface pricing failures via UserWarning
